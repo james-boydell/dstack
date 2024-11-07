@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload, selectinload
+from sqlalchemy.orm import selectinload
 
 import dstack._internal.server.services.gateways as gateways
 from dstack._internal.core.errors import BackendError, ResourceNotExistsError, SSHError
@@ -221,7 +221,7 @@ async def process_terminating_job(session: AsyncSession, job_model: JobModel):
             .where(InstanceModel.id == job_model.used_instance_id)
             .options(
                 selectinload(InstanceModel.project).joinedload(ProjectModel.backends),
-                selectinload(InstanceModel.volumes),
+                selectinload(InstanceModel.volumes).joinedload(VolumeModel.user),
                 selectinload(InstanceModel.job),
             )
             .with_for_update()
@@ -354,15 +354,15 @@ async def detach_volumes_from_instance(
     detached_volumes = []
 
     for volume_model in instance.volumes:
-        # reload volume_model with user
-        # this could likely be handled better
-        res = await session.execute(
-            select(VolumeModel)
-            .where(VolumeModel.id == volume_model.id)
-            .options(joinedload(VolumeModel.user))
-        )
+        # # reload volume_model with user
+        # # this could likely be handled better
+        # res = await session.execute(
+        #     select(VolumeModel)
+        #     .where(VolumeModel.id == volume_model.id)
+        #     .options(joinedload(VolumeModel.user))
+        # )
 
-        volume_model = res.unique().scalar_one()
+        # volume_model = res.unique().scalar_one()
 
         volume = volume_model_to_volume(volume_model)
         try:
