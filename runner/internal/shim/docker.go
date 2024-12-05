@@ -36,9 +36,11 @@ import (
 // TODO: Allow for configuration via cli arguments or environment variables.
 const ImagePullTimeout time.Duration = 20 * time.Minute
 
-// Set to "true" on containers spawned by DockerRunner, used for identification.
-const LabelKeyIsRun = "ai.dstack.shim.is-run"
-const LabelValueTrue = "true"
+const (
+	// Set to "true" on containers spawned by DockerRunner, used for identification.
+	LabelKeyIsRun  = "ai.dstack.shim.is-run"
+	LabelValueTrue = "true"
+)
 
 // Depricated: Remove on next release (0.19)
 type ContainerStatus struct {
@@ -254,7 +256,7 @@ func (d *DockerRunner) Stop(force bool) {
 	}
 }
 
-func (d DockerRunner) GetState() (RunnerStatus, ContainerStatus, string, JobResult) {
+func (d *DockerRunner) GetState() (RunnerStatus, ContainerStatus, string, JobResult) {
 	return d.state, d.containerStatus, d.executorError, d.jobResult
 }
 
@@ -300,7 +302,7 @@ func unmountVolumes(taskConfig TaskConfig) error {
 		}
 	}
 	if len(failed) > 0 {
-		return fmt.Errorf("Failed to unmount volume(s): %v", failed)
+		return fmt.Errorf("failed to unmount volume(s): %v", failed)
 	}
 	return nil
 }
@@ -314,11 +316,24 @@ func formatAndMountVolume(volume VolumeInfo) error {
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
-	_, err = initFileSystem(deviceName, !volume.InitFs)
+	fsCreated, err := initFileSystem(deviceName, !volume.InitFs)
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
-	err = mountDisk(deviceName, getVolumeMountPoint(volume.Name))
+	// Make FS root directory world-writable (0777) to give any job user
+	// a permission to create new files
+	// NOTE: mke2fs (that is, mkfs.ext4) supports `-E root_perms=0777` since 1.47.1:
+	// https://e2fsprogs.sourceforge.net/e2fsprogs-release.html#1.47.1
+	// but, as of 2024-12-04, this version is too new to rely on, for example,
+	// Ubuntu 24.04 LTS has only 1.47.0
+	// 0 means "do not chmod root directory"
+	var fsRootPerms os.FileMode = 0
+	// Change permissions only if the FS was created by us, don't mess with
+	// user-formatted volumes
+	if fsCreated {
+		fsRootPerms = 0o777
+	}
+	err = mountDisk(deviceName, getVolumeMountPoint(volume.Name), fsRootPerms)
 	if err != nil {
 		return tracerr.Wrap(err)
 	}
@@ -331,9 +346,17 @@ func getVolumeMountPoint(volumeName string) string {
 }
 
 func prepareInstanceMountPoints(taskConfig TaskConfig) error {
+	// If the instance volume directory doesn't exist, create it with world-writable permissions (0777)
+	// to give any job user a permission to create new files
+	// If the directory already exists, do nothing, don't mess with already set permissions, especially
+	// on SSH fleets where permissions are managed by the host admin
 	for _, mountPoint := range taskConfig.InstanceMounts {
 		if _, err := os.Stat(mountPoint.InstancePath); errors.Is(err, os.ErrNotExist) {
-			if err = os.MkdirAll(mountPoint.InstancePath, 0777); err != nil {
+			// All missing parent dirs are created with 0755 permissions
+			if err = os.MkdirAll(mountPoint.InstancePath, 0o755); err != nil {
+				return tracerr.Wrap(err)
+			}
+			if err = os.Chmod(mountPoint.InstancePath, 0o777); err != nil {
 				return tracerr.Wrap(err)
 			}
 		} else if err != nil {
@@ -351,7 +374,7 @@ func initFileSystem(deviceName string, errorIfNotExists bool) (bool, error) {
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
-		return false, fmt.Errorf("failed to check if disk is formatted: %v", err)
+		return false, fmt.Errorf("failed to check if disk is formatted: %w", err)
 	}
 
 	// If the output is not empty, the disk is already formatted
@@ -367,18 +390,18 @@ func initFileSystem(deviceName string, errorIfNotExists bool) (bool, error) {
 	log.Printf("Formatting disk %s with ext4 filesystem...\n", deviceName)
 	cmd = exec.Command("mkfs.ext4", "-F", deviceName)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return false, fmt.Errorf("failed to format disk: %s, output: %s", err, string(output))
+		return false, fmt.Errorf("failed to format disk: %w, output: %s", err, string(output))
 	}
 	log.Println("Disk formatted succesfully!")
 	return true, nil
 }
 
-func mountDisk(deviceName, mountPoint string) error {
+func mountDisk(deviceName, mountPoint string, fsRootPerms os.FileMode) error {
 	// Create the mount point directory if it doesn't exist
 	if _, err := os.Stat(mountPoint); os.IsNotExist(err) {
 		fmt.Printf("Creating mount point %s...\n", mountPoint)
-		if err := os.MkdirAll(mountPoint, 0755); err != nil {
-			return fmt.Errorf("failed to create mount point: %s", err)
+		if err := os.MkdirAll(mountPoint, 0o755); err != nil {
+			return fmt.Errorf("failed to create mount point: %w", err)
 		}
 	}
 
@@ -386,7 +409,13 @@ func mountDisk(deviceName, mountPoint string) error {
 	log.Printf("Mounting disk %s to %s...\n", deviceName, mountPoint)
 	cmd := exec.Command("mount", deviceName, mountPoint)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("failed to mount disk: %s, output: %s", err, string(output))
+		return fmt.Errorf("failed to mount disk: %w, output: %s", err, string(output))
+	}
+
+	if fsRootPerms != 0 {
+		if err := os.Chmod(mountPoint, fsRootPerms); err != nil {
+			return fmt.Errorf("failed to chmod volume root directory %s: %w", mountPoint, err)
+		}
 	}
 
 	log.Println("Disk mounted successfully!")
@@ -515,7 +544,7 @@ func createContainer(ctx context.Context, client docker.APIClient, runnerDir str
 	}
 	mounts = append(mounts, instanceMounts...)
 
-	//Set the environment variables
+	// Set the environment variables
 	envVars := []string{}
 	if dockerParams.DockerPJRTDevice() != "" {
 		envVars = append(envVars, fmt.Sprintf("PJRT_DEVICE=%s", dockerParams.DockerPJRTDevice()))
@@ -606,16 +635,21 @@ func getSSHShellCommands(openSSHPort int, publicSSHKey string) []string {
 		// prohibit password authentication
 		"sed -i \"s/.*PasswordAuthentication.*/PasswordAuthentication no/g\" /etc/ssh/sshd_config",
 		// create ssh dirs and add public key
-		"mkdir -p /run/sshd ~/.ssh",
+		"mkdir -p ~/.ssh",
 		"chmod 700 ~/.ssh",
 		fmt.Sprintf("echo '%s' > ~/.ssh/authorized_keys", publicSSHKey),
 		"chmod 600 ~/.ssh/authorized_keys",
-		// preserve environment variables for SSH clients
-		"env >> ~/.ssh/environment",
 		"sed -ie '1s@^@export PATH=\"'\"$PATH\"':$PATH\"\\n\\n@' ~/.profile",
 		// regenerate host keys
 		"rm -rf /etc/ssh/ssh_host_*",
 		"ssh-keygen -A > /dev/null",
+		// Ensure that PRIVSEP_PATH 1) exists 2) empty 3) owned by root,
+		// see https://github.com/dstackai/dstack/issues/1999
+		// /run/sshd is used in Debian-based distros, including Ubuntu:
+		// https://salsa.debian.org/ssh-team/openssh/-/blob/debian/1%259.7p1-7/debian/rules#L60
+		// /var/empty is the default path if not configured via ./configure --with-privsep-path=...
+		"rm -rf /run/sshd && mkdir -p /run/sshd && chown root:root /run/sshd",
+		"rm -rf /var/empty && mkdir -p /var/empty && chown root:root /var/empty",
 		// start sshd
 		fmt.Sprintf("/usr/sbin/sshd -p %d -o PermitUserEnvironment=yes", openSSHPort),
 		// restore ld.so variables
@@ -690,6 +724,8 @@ func configureGpuIfAvailable(hostConfig *container.HostConfig) {
 		// --security-opt=seccomp=unconfined
 		hostConfig.SecurityOpt = append(hostConfig.SecurityOpt, "seccomp=unconfined")
 		// TODO: in addition, for non-root user, --group-add=video, and possibly --group-add=render, are required.
+	case NoVendor:
+		// nothing to do
 	}
 }
 
@@ -760,7 +796,7 @@ func getContainerLastLogs(client docker.APIClient, containerID string, n int) ([
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 
@@ -769,15 +805,15 @@ func getContainerLastLogs(client docker.APIClient, containerID string, n int) ([
 
 /* DockerParameters interface implementation for CLIArgs */
 
-func (c CLIArgs) DockerPrivileged() bool {
+func (c *CLIArgs) DockerPrivileged() bool {
 	return c.Docker.Privileged
 }
 
-func (c CLIArgs) DockerPJRTDevice() string {
+func (c *CLIArgs) DockerPJRTDevice() string {
 	return c.Docker.PJRTDevice
 }
 
-func (c CLIArgs) DockerShellCommands(publicKeys []string) []string {
+func (c *CLIArgs) DockerShellCommands(publicKeys []string) []string {
 	concatinatedPublicKeys := c.Docker.ConcatinatedPublicSSHKeys
 	if len(publicKeys) > 0 {
 		concatinatedPublicKeys = strings.Join(publicKeys, "\n")
@@ -787,7 +823,7 @@ func (c CLIArgs) DockerShellCommands(publicKeys []string) []string {
 	return commands
 }
 
-func (c CLIArgs) DockerMounts(hostRunnerDir string) ([]mount.Mount, error) {
+func (c *CLIArgs) DockerMounts(hostRunnerDir string) ([]mount.Mount, error) {
 	return []mount.Mount{
 		{
 			Type:   mount.TypeBind,
@@ -802,11 +838,11 @@ func (c CLIArgs) DockerMounts(hostRunnerDir string) ([]mount.Mount, error) {
 	}, nil
 }
 
-func (c CLIArgs) DockerPorts() []int {
+func (c *CLIArgs) DockerPorts() []int {
 	return []int{c.Runner.HTTPPort, c.Docker.SSHPort}
 }
 
-func (c CLIArgs) MakeRunnerDir() (string, error) {
+func (c *CLIArgs) MakeRunnerDir() (string, error) {
 	runnerTemp := filepath.Join(c.Shim.HomeDir, "runners", time.Now().Format("20060102-150405"))
 	if err := os.MkdirAll(runnerTemp, 0o755); err != nil {
 		return "", tracerr.Wrap(err)
@@ -853,7 +889,7 @@ func FindExecutorError(runnerDir string) string {
 	for {
 		line, _, err := scanner.LineBytes()
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return "" // consts.ExecutorFailedSignature is not found in file
 			}
 			log.Printf("FindExecutorError scan error: %s\n", err)
