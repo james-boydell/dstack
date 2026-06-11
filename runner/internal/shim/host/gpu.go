@@ -28,7 +28,8 @@ type GpuInfo struct {
 	Name   string
 	Vram   int // MiB
 	// NVIDIA: device UUID reported by NVML, "globally unique immutable alphanumeric identifier of the GPU",
-	// in the form of `GPU-2b79666e-d81f-f3f8-fd47-9903f118c3f5`
+	// in the form of `GPU-2b79666e-d81f-f3f8-fd47-9903f118c3f5`. For MIG instances it is the MIG device
+	// UUID (`MIG-<uuid>`), which the NVIDIA container runtime also accepts in DeviceIDs.
 	// AMD: empty string (AMD devices have IDs in `amd-smi list`, but we don't need them)
 	// Intel: empty string (Gaudi devices have IDs called `uuid`, e.g., `01P0-HL2080A0-15-TNPS14-20-07-07`,
 	// but habana Docker runtime only accepts indices, see below)

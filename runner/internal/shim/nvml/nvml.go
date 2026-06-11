@@ -15,8 +15,9 @@ package nvml
 import "errors"
 
 // ErrNotSupported indicates that the requested NVML operation is not supported
-// by the current GPU or driver. Callers typically treat this as "feature
-// absent" rather than a hard error.
+// by the current GPU or driver (for example, querying MIG mode on a GPU that
+// has no MIG capability). Callers typically treat this as "feature absent"
+// rather than a hard error.
 var ErrNotSupported = errors.New("nvml: operation not supported")
 
 // ErrUnavailable indicates that NVML is not available in this build, for
@@ -36,19 +37,29 @@ type Utilization struct {
 	Memory uint32
 }
 
-// Device represents an NVML device handle for a physical GPU.
+// Device represents an NVML device handle. It may be a physical GPU or a MIG
+// (Multi-Instance GPU) instance; both expose the same subset of operations
+// that dstack needs.
 type Device interface {
 	// Name returns the product name of the device, e.g.
 	// "NVIDIA RTX PRO 6000 Blackwell".
 	Name() (string, error)
-	// UUID returns the globally unique identifier of the device, in the form
-	// "GPU-<uuid>".
+	// UUID returns the globally unique identifier of the device. For physical
+	// GPUs this looks like "GPU-<uuid>"; for MIG instances it looks like
+	// "MIG-<uuid>". Both forms are accepted by the NVIDIA container runtime.
 	UUID() (string, error)
-	// MemoryInfo returns the device's framebuffer memory in bytes.
+	// MemoryInfo returns the device's framebuffer memory in bytes. For a MIG
+	// instance this is the memory of that instance, not the parent GPU.
 	MemoryInfo() (Memory, error)
 	// UtilizationRates returns current GPU/memory utilization. It may return
-	// ErrNotSupported on some drivers.
+	// ErrNotSupported, e.g. for MIG instances on some drivers.
 	UtilizationRates() (Utilization, error)
+	// MIGEnabled reports whether MIG mode is currently enabled on the device.
+	// It returns (false, nil) when MIG is not supported by the GPU or driver.
+	MIGEnabled() (bool, error)
+	// MIGDevices returns the MIG instance handles configured under this device.
+	// It returns an empty slice when MIG is disabled or unsupported.
+	MIGDevices() ([]Device, error)
 }
 
 // API is the entry point to NVML. Init must be called before any other method,

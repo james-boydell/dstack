@@ -82,3 +82,47 @@ func (d *nvmlDevice) UtilizationRates() (Utilization, error) {
 	}
 	return Utilization{GPU: util.Gpu, Memory: util.Memory}, nil
 }
+
+// migUnsupported reports whether a Return code means MIG is simply not
+// available on this GPU/driver, as opposed to a genuine failure. GPUs without
+// MIG return ERROR_NOT_SUPPORTED; very old drivers whose libnvidia-ml.so
+// predates the MIG API return ERROR_FUNCTION_NOT_FOUND. Both are benign.
+func migUnsupported(ret gonvml.Return) bool {
+	return ret == gonvml.ERROR_NOT_SUPPORTED || ret == gonvml.ERROR_FUNCTION_NOT_FOUND
+}
+
+func (d *nvmlDevice) MIGEnabled() (bool, error) {
+	currentMode, _, ret := d.dev.GetMigMode()
+	if migUnsupported(ret) {
+		return false, nil
+	}
+	if err := retErr("nvmlDeviceGetMigMode", ret); err != nil {
+		return false, err
+	}
+	return currentMode == gonvml.DEVICE_MIG_ENABLE, nil
+}
+
+func (d *nvmlDevice) MIGDevices() ([]Device, error) {
+	maxCount, ret := d.dev.GetMaxMigDeviceCount()
+	if migUnsupported(ret) {
+		return nil, nil
+	}
+	if err := retErr("nvmlDeviceGetMaxMigDeviceCount", ret); err != nil {
+		return nil, err
+	}
+
+	devices := make([]Device, 0, maxCount)
+	for i := 0; i < maxCount; i++ {
+		migDev, ret := d.dev.GetMigDeviceHandleByIndex(i)
+		// Indices without a configured MIG instance return ERROR_NOT_FOUND;
+		// skip them. (MaxMigDeviceCount is an upper bound, not the actual count.)
+		if ret == gonvml.ERROR_NOT_FOUND {
+			continue
+		}
+		if err := retErr("nvmlDeviceGetMigDeviceHandleByIndex", ret); err != nil {
+			return devices, err
+		}
+		devices = append(devices, &nvmlDevice{dev: migDev})
+	}
+	return devices, nil
+}
