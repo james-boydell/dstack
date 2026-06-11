@@ -1096,7 +1096,7 @@ func configureGpuDevices(hostConfig *container.HostConfig, gpuDevices []GPUDevic
 }
 
 func configureGpus(config *container.Config, hostConfig *container.HostConfig, vendor gpu.GpuVendor, ids []string) {
-	// NVIDIA: ids are identifiers reported by nvidia-smi, GPU-<UUID> strings
+	// NVIDIA: ids are identifiers reported by NVML, GPU-<UUID> strings (or MIG-<UUID> for MIG instances)
 	// AMD: ids are DRI render node paths, e.g., /dev/dri/renderD128
 	// Tenstorrent: ids are device indices to be used with /dev/tenstorrent/<id>
 	switch vendor {

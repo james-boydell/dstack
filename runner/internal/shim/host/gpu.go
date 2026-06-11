@@ -27,8 +27,9 @@ type GpuInfo struct {
 	Vendor gpu.GpuVendor
 	Name   string
 	Vram   int // MiB
-	// NVIDIA: uuid field from nvidia-smi, "globally unique immutable alphanumeric identifier of the GPU",
-	// in the form of `GPU-2b79666e-d81f-f3f8-fd47-9903f118c3f5`
+	// NVIDIA: device UUID reported by NVML, "globally unique immutable alphanumeric identifier of the GPU",
+	// in the form of `GPU-2b79666e-d81f-f3f8-fd47-9903f118c3f5`. For MIG instances it is the MIG device
+	// UUID (`MIG-<uuid>`), which the NVIDIA container runtime also accepts in DeviceIDs.
 	// AMD: empty string (AMD devices have IDs in `amd-smi list`, but we don't need them)
 	// Intel: empty string (Gaudi devices have IDs called `uuid`, e.g., `01P0-HL2080A0-15-TNPS14-20-07-07`,
 	// but habana Docker runtime only accepts indices, see below)
@@ -57,135 +58,6 @@ func GetGpuInfo(ctx context.Context) []GpuInfo {
 		return []GpuInfo{}
 	}
 	return []GpuInfo{}
-}
-
-func getNvidiaGpuInfo(ctx context.Context) []GpuInfo {
-	gpus := []GpuInfo{}
-
-	// Query physical GPUs: name, memory, uuid, and MIG mode status.
-	cmd := execute.ExecTask{
-		Command:     "nvidia-smi",
-		Args:        []string{"--query-gpu=name,memory.total,uuid,mig.mode.current", "--format=csv,noheader,nounits"},
-		StreamStdio: false,
-	}
-	res, err := cmd.Execute(ctx)
-	if err != nil {
-		log.Error(ctx, "failed to execute nvidia-smi", "err", err)
-		return gpus
-	}
-	if res.ExitCode != 0 {
-		log.Error(
-			ctx, "failed to execute nvidia-smi",
-			"exitcode", res.ExitCode, "stdout", res.Stdout, "stderr", res.Stderr,
-		)
-		return gpus
-	}
-
-	// Track which physical GPUs have MIG enabled.
-	type physicalGpu struct {
-		name    string
-		vram    int
-		uuid    string
-		migMode string
-	}
-	var physicalGpus []physicalGpu
-
-	r := csv.NewReader(strings.NewReader(res.Stdout))
-	for {
-		record, err := r.Read()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			log.Error(ctx, "cannot read csv", "err", err)
-			return gpus
-		}
-		if len(record) != 4 {
-			log.Error(ctx, "4 csv fields expected", "len", len(record))
-			return gpus
-		}
-		vram, err := strconv.Atoi(strings.TrimSpace(record[1]))
-		if err != nil {
-			log.Error(ctx, "invalid VRAM value", "value", record[1])
-			vram = 0
-		}
-		physicalGpus = append(physicalGpus, physicalGpu{
-			name:    strings.TrimSpace(record[0]),
-			vram:    vram,
-			uuid:    strings.TrimSpace(record[2]),
-			migMode: strings.TrimSpace(record[3]),
-		})
-	}
-
-	// Check if any GPU has MIG enabled.
-	hasMIG := false
-	for _, pg := range physicalGpus {
-		if strings.EqualFold(pg.migMode, "Enabled") {
-			hasMIG = true
-			break
-		}
-	}
-
-	if hasMIG {
-		// Enumerate MIG device instances instead of physical GPUs.
-		// mig_uuid is required by nvidia-container-runtime to target a specific MIG instance.
-		migCmd := execute.ExecTask{
-			Command:     "nvidia-smi",
-			Args:        []string{"--query-mig-device=name,memory.total,mig_uuid", "--format=csv,noheader,nounits"},
-			StreamStdio: false,
-		}
-		migRes, err := migCmd.Execute(ctx)
-		if err != nil {
-			log.Error(ctx, "failed to execute nvidia-smi for MIG devices", "err", err)
-			return gpus
-		}
-		if migRes.ExitCode != 0 {
-			log.Error(
-				ctx, "failed to execute nvidia-smi for MIG devices",
-				"exitcode", migRes.ExitCode, "stdout", migRes.Stdout, "stderr", migRes.Stderr,
-			)
-			return gpus
-		}
-
-		mr := csv.NewReader(strings.NewReader(migRes.Stdout))
-		for {
-			record, err := mr.Read()
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			if err != nil {
-				log.Error(ctx, "cannot read MIG csv", "err", err)
-				return gpus
-			}
-			if len(record) != 3 {
-				log.Error(ctx, "3 csv fields expected for MIG devices", "len", len(record))
-				return gpus
-			}
-			vram, err := strconv.Atoi(strings.TrimSpace(record[1]))
-			if err != nil {
-				log.Error(ctx, "invalid MIG VRAM value", "value", record[1])
-				vram = 0
-			}
-			gpus = append(gpus, GpuInfo{
-				Vendor: gpu.GpuVendorNvidia,
-				Name:   strings.TrimSpace(record[0]),
-				Vram:   vram,
-				ID:     strings.TrimSpace(record[2]),
-			})
-		}
-		return gpus
-	}
-
-	// No MIG: report physical GPUs as before.
-	for _, pg := range physicalGpus {
-		gpus = append(gpus, GpuInfo{
-			Vendor: gpu.GpuVendorNvidia,
-			Name:   pg.name,
-			Vram:   pg.vram,
-			ID:     pg.uuid,
-		})
-	}
-	return gpus
 }
 
 type amdGpu struct {

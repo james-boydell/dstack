@@ -4,6 +4,7 @@ go 1.25
 
 require (
 	github.com/NVIDIA/go-dcgm v0.0.0-20250707210631-823394f2bd9b
+	github.com/NVIDIA/go-nvml v0.13.1-0
 	github.com/alexellis/go-execute/v2 v2.2.1
 	github.com/bluekeyes/go-gitdiff v0.7.2
 	github.com/codeclysm/extract/v4 v4.0.0
