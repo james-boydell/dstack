@@ -60,6 +60,11 @@ type Device interface {
 	// MIGDevices returns the MIG instance handles configured under this device.
 	// It returns an empty slice when MIG is disabled or unsupported.
 	MIGDevices() ([]Device, error)
+	// GpuInstanceID returns the GPU instance ID of a MIG device. This is the
+	// same identifier DCGM/dcgm-exporter expose as the `GPU_I_ID` label, used to
+	// correlate a MIG instance with its DCGM metrics. Only meaningful for MIG
+	// device handles (those returned by MIGDevices).
+	GpuInstanceID() (int, error)
 }
 
 // API is the entry point to NVML. Init must be called before any other method,

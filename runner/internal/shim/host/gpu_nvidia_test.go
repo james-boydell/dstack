@@ -23,22 +23,25 @@ type fakeDevice struct {
 	util       nvml.Utilization
 	migEnabled bool
 	migDevices []nvml.Device
+	giID       int
 
 	nameErr       error
 	uuidErr       error
 	memErr        error
 	migEnabledErr error
 	migDevicesErr error
+	giIDErr       error
 }
 
-func (d *fakeDevice) Name() (string, error)                  { return d.name, d.nameErr }
-func (d *fakeDevice) UUID() (string, error)                  { return d.uuid, d.uuidErr }
-func (d *fakeDevice) MemoryInfo() (nvml.Memory, error)       { return d.mem, d.memErr }
+func (d *fakeDevice) Name() (string, error)            { return d.name, d.nameErr }
+func (d *fakeDevice) UUID() (string, error)            { return d.uuid, d.uuidErr }
+func (d *fakeDevice) MemoryInfo() (nvml.Memory, error) { return d.mem, d.memErr }
 func (d *fakeDevice) UtilizationRates() (nvml.Utilization, error) {
 	return d.util, nil
 }
-func (d *fakeDevice) MIGEnabled() (bool, error)        { return d.migEnabled, d.migEnabledErr }
+func (d *fakeDevice) MIGEnabled() (bool, error)          { return d.migEnabled, d.migEnabledErr }
 func (d *fakeDevice) MIGDevices() ([]nvml.Device, error) { return d.migDevices, d.migDevicesErr }
+func (d *fakeDevice) GpuInstanceID() (int, error)        { return d.giID, d.giIDErr }
 
 // fakeAPI is an in-memory nvml.API.
 type fakeAPI struct {
@@ -73,6 +76,10 @@ func physicalDevice(name, uuid string, vramGiB uint64) *fakeDevice {
 
 func migDevice(uuid string, vramGiB uint64) *fakeDevice {
 	return &fakeDevice{uuid: uuid, mem: nvml.Memory{Total: vramGiB * gib}}
+}
+
+func migDeviceWithGI(uuid string, vramGiB uint64, giID int) *fakeDevice {
+	return &fakeDevice{uuid: uuid, mem: nvml.Memory{Total: vramGiB * gib}, giID: giID}
 }
 
 func TestCollectNvidiaGpuInfo_NoMIG(t *testing.T) {
@@ -266,6 +273,34 @@ func TestGetNvidiaGpuInfo_ShutsDownNVML(t *testing.T) {
 	require.Len(t, gpus, 1)
 	assert.Equal(t, "GPU-L4", gpus[0].ID)
 	assert.True(t, api.shutdownCalled, "NVML must be shut down even on the success path")
+}
+
+func TestCollectNvidiaMIGDCGMLabels(t *testing.T) {
+	parent := &fakeDevice{
+		name:       "NVIDIA RTX PRO 6000 Blackwell",
+		uuid:       "GPU-PARENT",
+		migEnabled: true,
+		migDevices: []nvml.Device{
+			migDeviceWithGI("MIG-aaaa", 24, 5),
+			migDeviceWithGI("MIG-bbbb", 24, 6),
+		},
+	}
+	api := &fakeAPI{devices: []nvml.Device{parent}}
+
+	labels, err := collectNvidiaMIGDCGMLabels(context.Background(), api)
+	require.NoError(t, err)
+
+	// physical GPU index 0, GPU instance IDs 5 and 6
+	assert.Equal(t, []string{`gpu="0"`, `GPU_I_ID="5"`}, labels["MIG-aaaa"])
+	assert.Equal(t, []string{`gpu="0"`, `GPU_I_ID="6"`}, labels["MIG-bbbb"])
+	assert.Len(t, labels, 2)
+}
+
+func TestCollectNvidiaMIGDCGMLabels_NoMIG(t *testing.T) {
+	api := &fakeAPI{devices: []nvml.Device{physicalDevice("NVIDIA L4", "GPU-L4", 24)}}
+	labels, err := collectNvidiaMIGDCGMLabels(context.Background(), api)
+	require.NoError(t, err)
+	assert.Empty(t, labels)
 }
 
 func TestBytesToMiB(t *testing.T) {

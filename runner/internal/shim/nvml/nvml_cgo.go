@@ -102,6 +102,11 @@ func (d *nvmlDevice) MIGEnabled() (bool, error) {
 	return currentMode == gonvml.DEVICE_MIG_ENABLE, nil
 }
 
+func (d *nvmlDevice) GpuInstanceID() (int, error) {
+	id, ret := d.dev.GetGpuInstanceId()
+	return id, retErr("nvmlDeviceGetGpuInstanceId", ret)
+}
+
 func (d *nvmlDevice) MIGDevices() ([]Device, error) {
 	maxCount, ret := d.dev.GetMaxMigDeviceCount()
 	if migUnsupported(ret) {

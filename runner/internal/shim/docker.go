@@ -151,7 +151,11 @@ type DockerRunner struct {
 	gpus         []host.GpuInfo
 	gpuVendor    gpu.GpuVendor
 	gpuLock      *GpuLock
-	tasks        TaskStorage
+	// migDCGMLabels maps a MIG instance UUID (as used in gpuIDs) to the
+	// dcgm-exporter label substrings identifying it (gpu + GPU_I_ID). Empty for
+	// non-NVIDIA hosts and NVIDIA hosts without MIG. Built once at startup.
+	migDCGMLabels map[string][]string
+	tasks         TaskStorage
 }
 
 func NewDockerRunner(ctx context.Context, dockerParams DockerParameters) (*DockerRunner, error) {
@@ -185,15 +189,24 @@ func NewDockerRunner(ctx context.Context, dockerParams DockerParameters) (*Docke
 		return nil, fmt.Errorf("create GPU lock: %w", err)
 	}
 
+	// Map MIG UUIDs to their dcgm-exporter labels so per-task DCGM metrics can be
+	// filtered correctly under MIG (dcgm-exporter labels by gpu+GPU_I_ID, not MIG
+	// UUID). Empty unless this is an NVIDIA host with MIG enabled.
+	migDCGMLabels := map[string][]string{}
+	if gpuVendor == gpu.GpuVendorNvidia {
+		migDCGMLabels = host.GetNvidiaMIGDCGMLabels(ctx)
+	}
+
 	runner := &DockerRunner{
-		client:       client,
-		dockerParams: dockerParams,
-		dockerInfo:   dockerInfo,
-		baseEnv:      baseEnv,
-		gpus:         gpus,
-		gpuVendor:    gpuVendor,
-		gpuLock:      gpuLock,
-		tasks:        NewTaskStorage(),
+		client:        client,
+		dockerParams:  dockerParams,
+		dockerInfo:    dockerInfo,
+		baseEnv:       baseEnv,
+		gpus:          gpus,
+		gpuVendor:     gpuVendor,
+		gpuLock:       gpuLock,
+		migDCGMLabels: migDCGMLabels,
+		tasks:         NewTaskStorage(),
 	}
 
 	if err := runner.restoreStateFromContainers(ctx); err != nil {
@@ -343,8 +356,25 @@ func (d *DockerRunner) TaskInfo(taskID string) TaskInfo {
 		ContainerName:      task.containerName,
 		ContainerID:        task.containerID,
 		GpuIDs:             task.gpuIDs,
+		DCGMMatchers:       d.dcgmMatchers(task.gpuIDs),
 		ImagePullProgress:  task.pullTracker.Progress(),
 	}
+}
+
+// dcgmMatchers translates a task's assigned GPU resource IDs into dcgm-exporter
+// label matchers (see dcgm.FilterMetrics). For a MIG instance, the matcher is
+// the (gpu, GPU_I_ID) label pair resolved at startup; for a physical GPU, it is
+// the GPU UUID itself, which appears verbatim in the `UUID="..."` label.
+func (d *DockerRunner) dcgmMatchers(gpuIDs []string) [][]string {
+	matchers := make([][]string, 0, len(gpuIDs))
+	for _, id := range gpuIDs {
+		if labels, ok := d.migDCGMLabels[id]; ok {
+			matchers = append(matchers, labels)
+		} else {
+			matchers = append(matchers, []string{id})
+		}
+	}
+	return matchers
 }
 
 func (d *DockerRunner) Submit(ctx context.Context, cfg TaskConfig) error {
