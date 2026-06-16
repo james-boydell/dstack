@@ -24,6 +24,9 @@ type TaskRunner interface {
 	Resources(context.Context) shim.Resources
 	TaskList() []*shim.TaskListItem
 	TaskInfo(taskID string) shim.TaskInfo
+	// TaskDCGMMatchers returns dcgm-exporter label matchers for the task's GPUs,
+	// used to filter the DCGM exporter output down to a single task.
+	TaskDCGMMatchers(taskID string) [][]string
 }
 
 type ShimServer struct {

@@ -42,6 +42,10 @@ func (ds *DummyRunner) TaskInfo(taskID string) shim.TaskInfo {
 	return shim.TaskInfo{}
 }
 
+func (ds *DummyRunner) TaskDCGMMatchers(taskID string) [][]string {
+	return nil
+}
+
 func (ds *DummyRunner) Resources(context.Context) shim.Resources {
 	return shim.Resources{}
 }

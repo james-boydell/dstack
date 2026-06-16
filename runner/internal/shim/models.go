@@ -128,9 +128,4 @@ type TaskInfo struct {
 	ContainerName      string
 	ContainerID        string
 	GpuIDs             []string
-	// DCGMMatchers holds, per assigned GPU, the dcgm-exporter label substrings
-	// identifying that GPU's metric lines (AND within a matcher). Used to filter
-	// the DCGM exporter output down to this task. For MIG instances this is the
-	// (gpu, GPU_I_ID) pair; for physical GPUs it is the GPU UUID.
-	DCGMMatchers [][]string
 }

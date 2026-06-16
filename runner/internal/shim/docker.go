@@ -356,9 +356,20 @@ func (d *DockerRunner) TaskInfo(taskID string) TaskInfo {
 		ContainerName:      task.containerName,
 		ContainerID:        task.containerID,
 		GpuIDs:             task.gpuIDs,
-		DCGMMatchers:       d.dcgmMatchers(task.gpuIDs),
 		ImagePullProgress:  task.pullTracker.Progress(),
 	}
+}
+
+// TaskDCGMMatchers returns the dcgm-exporter label matchers for the GPUs
+// assigned to the given task, used by the metrics endpoint to filter the DCGM
+// exporter output down to this task (see dcgm.FilterMetrics). It returns nil for
+// an unknown task.
+func (d *DockerRunner) TaskDCGMMatchers(taskID string) [][]string {
+	task, ok := d.tasks.Get(taskID)
+	if !ok {
+		return nil
+	}
+	return d.dcgmMatchers(task.gpuIDs)
 }
 
 // dcgmMatchers translates a task's assigned GPU resource IDs into dcgm-exporter
