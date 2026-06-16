@@ -2,6 +2,7 @@ package host
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/dstackai/dstack/runner/internal/common/gpu"
 	"github.com/dstackai/dstack/runner/internal/common/log"
@@ -161,4 +162,83 @@ func collectNvidiaMIGDevices(ctx context.Context, device nvml.Device, parentName
 // used by GpuInfo.Vram.
 func bytesToMiB(b uint64) int {
 	return int(b / (1024 * 1024))
+}
+
+// GetNvidiaMIGDCGMLabels returns a map from MIG instance UUID (the form used as
+// GpuInfo.ID / container DeviceIDs, e.g. "MIG-<uuid>") to the dcgm-exporter
+// label substrings that identify that instance in DCGM metric lines.
+//
+// dcgm-exporter labels MIG rows with the *physical* GPU index and the GPU
+// instance ID (e.g. `gpu="0"`, `GPU_I_ID="5"`) — never the MIG UUID — so this
+// mapping is what lets the shim filter DCGM metrics down to a task's MIG
+// instances. The returned slice for each UUID is an AND-matcher: all substrings
+// must be present in a line for it to belong to that instance.
+//
+// It returns an empty map when MIG is disabled/unsupported or NVML is
+// unavailable (the caller then falls back to matching the physical GPU UUID).
+func GetNvidiaMIGDCGMLabels(ctx context.Context) map[string][]string {
+	api := newNVML()
+	if err := api.Init(); err != nil {
+		log.Error(ctx, "failed to initialize NVML for MIG DCGM labels", "err", err)
+		return map[string][]string{}
+	}
+	defer func() {
+		if err := api.Shutdown(); err != nil {
+			log.Warning(ctx, "failed to shut down NVML", "err", err)
+		}
+	}()
+	labels, err := collectNvidiaMIGDCGMLabels(ctx, api)
+	if err != nil {
+		log.Error(ctx, "failed to collect MIG DCGM labels", "err", err)
+	}
+	return labels
+}
+
+// collectNvidiaMIGDCGMLabels is the NVML-driven core of GetNvidiaMIGDCGMLabels,
+// separated so it can be unit-tested against a fake nvml.API.
+func collectNvidiaMIGDCGMLabels(ctx context.Context, api nvml.API) (map[string][]string, error) {
+	labels := map[string][]string{}
+
+	count, err := api.DeviceCount()
+	if err != nil {
+		return labels, err
+	}
+
+	for i := 0; i < count; i++ {
+		device, err := api.DeviceByIndex(i)
+		if err != nil {
+			log.Error(ctx, "failed to get NVIDIA device handle", "index", i, "err", err)
+			continue
+		}
+		migEnabled, err := device.MIGEnabled()
+		if err != nil || !migEnabled {
+			continue
+		}
+		migDevices, err := device.MIGDevices()
+		if err != nil {
+			log.Error(ctx, "failed to enumerate MIG devices", "index", i, "err", err)
+			continue
+		}
+		for _, mig := range migDevices {
+			uuid, err := mig.UUID()
+			if err != nil {
+				log.Error(ctx, "failed to get MIG instance UUID", "err", err)
+				continue
+			}
+			giID, err := mig.GpuInstanceID()
+			if err != nil {
+				log.Error(ctx, "failed to get GPU instance ID", "uuid", uuid, "err", err)
+				continue
+			}
+			// dcgm-exporter labels: gpu="<physical index>", GPU_I_ID="<gi id>".
+			// Quotes are included so substring matching is exact (e.g. GPU_I_ID="5"
+			// does not match GPU_I_ID="15" or GPU_I_ID="51").
+			labels[uuid] = []string{
+				fmt.Sprintf(`gpu="%d"`, i),
+				fmt.Sprintf(`GPU_I_ID="%d"`, giID),
+			}
+		}
+	}
+
+	return labels, nil
 }

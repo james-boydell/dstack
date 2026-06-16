@@ -1,12 +1,14 @@
 import asyncio
 import json
+import re
+import uuid
 from collections.abc import Mapping
-from typing import List, Optional
+from typing import List, NamedTuple, Optional
 
 from sqlalchemy import Delete, delete, select
 from sqlalchemy.orm import joinedload
 
-from dstack._internal.core.consts import DSTACK_RUNNER_HTTP_PORT
+from dstack._internal.core.consts import DSTACK_RUNNER_HTTP_PORT, DSTACK_SHIM_HTTP_PORT
 from dstack._internal.core.models.runs import JobStatus
 from dstack._internal.server import settings
 from dstack._internal.server.db import get_session_ctx
@@ -130,6 +132,7 @@ async def _collect_job_metrics(job_model: JobModel) -> Optional[JobMetricsPoint]
             ssh_private_keys,
             jpd,
             jrd,
+            job_model.id,
         )
     except Exception:
         logger.exception("Failed to collect job %s metrics", job_model.job_name)
@@ -140,7 +143,8 @@ async def _collect_job_metrics(job_model: JobModel) -> Optional[JobMetricsPoint]
         logger.warning("Failed to connect to job %s to collect metrics", job_model.job_name)
         return None
 
-    if res is None:
+    metrics, dcgm_text = res
+    if metrics is None:
         logger.debug(
             (
                 "Failed to collect job %s metrics."
@@ -151,23 +155,104 @@ async def _collect_job_metrics(job_model: JobModel) -> Optional[JobMetricsPoint]
         )
         return None
 
-    gpus_memory_usage_bytes = [g.gpu_memory_usage_bytes for g in res.gpus]
-    gpus_util_percent = [g.gpu_util_percent for g in res.gpus]
+    gpus_memory_usage_bytes = [g.gpu_memory_usage_bytes for g in metrics.gpus]
+    gpus_util_percent = [g.gpu_util_percent for g in metrics.gpus]
+
+    # Under MIG, the runner's nvidia-smi cannot report per-instance GPU utilization
+    # (it's only available via DCGM/GPM). When the shim provides per-MIG DCGM
+    # metrics, use them for both memory and utilization so the two stay aligned
+    # per instance (the DCGM output is labeled by GPU_I_ID, not by list position).
+    mig_points = _parse_dcgm_mig_metrics(dcgm_text) if dcgm_text else []
+    if mig_points:
+        gpus_memory_usage_bytes = [p.memory_usage_bytes for p in mig_points]
+        gpus_util_percent = [p.util_percent for p in mig_points]
 
     return JobMetricsPoint(
         job_id=job_model.id,
-        timestamp_micro=res.timestamp_micro,
-        cpu_usage_micro=res.cpu_usage_micro,
-        memory_usage_bytes=res.memory_usage_bytes,
-        memory_working_set_bytes=res.memory_working_set_bytes,
+        timestamp_micro=metrics.timestamp_micro,
+        cpu_usage_micro=metrics.cpu_usage_micro,
+        memory_usage_bytes=metrics.memory_usage_bytes,
+        memory_working_set_bytes=metrics.memory_working_set_bytes,
         gpus_memory_usage_bytes=json.dumps(gpus_memory_usage_bytes),
         gpus_util_percent=json.dumps(gpus_util_percent),
     )
 
 
+class _MIGPoint(NamedTuple):
+    memory_usage_bytes: int
+    util_percent: int
+
+
+# Matches a DCGM exporter sample line: NAME{label="v",...} <number>
+_DCGM_LINE_RE = re.compile(r"^(?P<name>DCGM_FI_\w+)\{(?P<labels>[^}]*)\}\s+(?P<value>[-\d.eE+]+)")
+_DCGM_LABEL_RE = re.compile(r'(\w+)="([^"]*)"')
+
+
+def _parse_dcgm_mig_metrics(dcgm_text: str) -> List[_MIGPoint]:
+    """
+    Parse per-MIG-instance memory and utilization from the shim's filtered
+    dcgm-exporter output.
+
+    Only MIG instances (lines carrying a ``GPU_I_ID`` label) are considered;
+    physical-GPU lines are ignored, so non-MIG jobs yield an empty list and fall
+    back to the runner's metrics. Instances are returned sorted by
+    ``(gpu, GPU_I_ID)`` for a stable per-instance order.
+    """
+    by_instance: dict[tuple[int, int], dict] = {}
+    for raw_line in dcgm_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _DCGM_LINE_RE.match(line)
+        if match is None:
+            continue
+        name = match.group("name")
+        if name not in ("DCGM_FI_DEV_FB_USED", "DCGM_FI_PROF_GR_ENGINE_ACTIVE"):
+            continue
+        labels = dict(_DCGM_LABEL_RE.findall(match.group("labels")))
+        gi_raw = labels.get("GPU_I_ID")
+        if not gi_raw:
+            # Not a MIG instance (physical GPU line) — ignore.
+            continue
+        try:
+            key = (int(labels.get("gpu", "0")), int(gi_raw))
+            value = float(match.group("value"))
+        except ValueError:
+            continue
+        entry = by_instance.setdefault(key, {})
+        if name == "DCGM_FI_DEV_FB_USED":
+            entry["memory_usage_bytes"] = int(value) * 1024 * 1024  # MiB -> bytes
+        else:  # DCGM_FI_PROF_GR_ENGINE_ACTIVE, a 0..1 ratio
+            entry["util_percent"] = round(value * 100)
+
+    points = []
+    for key in sorted(by_instance):
+        entry = by_instance[key]
+        points.append(
+            _MIGPoint(
+                memory_usage_bytes=entry.get("memory_usage_bytes", 0),
+                util_percent=entry.get("util_percent", 0),
+            )
+        )
+    return points
+
+
 @runner_ssh_tunnel
 def _pull_runner_metrics(
     addresses: Mapping[int, client.LocalAddress],
-) -> Optional[MetricsResponse]:
+    task_id: uuid.UUID,
+) -> tuple[Optional[MetricsResponse], Optional[str]]:
     runner_client = client.RunnerClient.from_address(addresses[DSTACK_RUNNER_HTTP_PORT])
-    return runner_client.get_metrics()
+    metrics = runner_client.get_metrics()
+    # On VM-based backends the shim port is also forwarded; fetch per-task DCGM
+    # metrics so MIG utilization (unavailable via the runner) can be filled in.
+    # Container-based backends have no shim, so the port is absent and we skip it.
+    dcgm_text: Optional[str] = None
+    shim_address = addresses.get(DSTACK_SHIM_HTTP_PORT)
+    if shim_address is not None:
+        try:
+            shim_client = client.ShimClient.from_address(shim_address)
+            dcgm_text = shim_client.get_task_metrics(task_id)
+        except Exception:
+            logger.debug("Failed to fetch DCGM metrics for task %s", task_id, exc_info=True)
+    return metrics, dcgm_text

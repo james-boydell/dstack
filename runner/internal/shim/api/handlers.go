@@ -169,7 +169,7 @@ func (s *ShimServer) TaskMetricsHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	response := dcgm.FilterMetrics(expfmtBody, taskInfo.GpuIDs)
+	response := dcgm.FilterMetrics(expfmtBody, taskInfo.DCGMMatchers)
 	_, _ = w.Write(response)
 }
 
