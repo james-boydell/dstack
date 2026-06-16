@@ -3,6 +3,7 @@ package metrics
 import (
 	"bytes"
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"os"
@@ -20,6 +21,11 @@ import (
 type MetricsCollector struct {
 	cgroupMountPoint string
 	gpuVendor        gpu.GpuVendor
+	// nvidiaMIG is true when the visible NVIDIA GPU(s) have MIG mode enabled.
+	// Under MIG, `nvidia-smi --query-gpu` returns N/A, so we collect memory from
+	// `nvidia-smi -q -x` instead (see GetNVIDIAGPUMetrics). Detected once, since
+	// MIG mode does not change during a container's lifetime.
+	nvidiaMIG bool
 }
 
 func NewMetricsCollector(ctx context.Context) (*MetricsCollector, error) {
@@ -30,10 +36,32 @@ func NewMetricsCollector(ctx context.Context) (*MetricsCollector, error) {
 		return nil, fmt.Errorf("get cgroup mount point: %w", err)
 	}
 	gpuVendor := gpu.GetGpuVendor()
+	nvidiaMIG := false
+	if gpuVendor == gpu.GpuVendorNvidia {
+		nvidiaMIG = detectNvidiaMIGEnabled(ctx)
+	}
 	return &MetricsCollector{
 		cgroupMountPoint: cgroupMountPoint,
 		gpuVendor:        gpuVendor,
+		nvidiaMIG:        nvidiaMIG,
 	}, nil
+}
+
+// detectNvidiaMIGEnabled reports whether any visible NVIDIA GPU has MIG mode
+// enabled. Failures (no nvidia-smi, query unsupported) are treated as "not MIG".
+func detectNvidiaMIGEnabled(ctx context.Context) bool {
+	cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=mig.mode.current", "--format=csv,noheader")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.EqualFold(strings.TrimSpace(line), "Enabled") {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *MetricsCollector) GetSystemMetrics(ctx context.Context) (*schemas.SystemMetrics, error) {
@@ -159,6 +187,9 @@ func (s *MetricsCollector) GetGPUMetrics(ctx context.Context) ([]schemas.GPUMetr
 }
 
 func (s *MetricsCollector) GetNVIDIAGPUMetrics(ctx context.Context) ([]schemas.GPUMetrics, error) {
+	if s.nvidiaMIG {
+		return s.GetNVIDIAMIGGPUMetrics(ctx)
+	}
 	cmd := exec.CommandContext(ctx, "nvidia-smi", "--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits")
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -166,6 +197,78 @@ func (s *MetricsCollector) GetNVIDIAGPUMetrics(ctx context.Context) ([]schemas.G
 		return []schemas.GPUMetrics{}, fmt.Errorf("failed to execute nvidia-smi: %w", err)
 	}
 	return parseNVIDIASMILikeMetrics(out.String())
+}
+
+// GetNVIDIAMIGGPUMetrics collects per-MIG-instance metrics. Under MIG,
+// `nvidia-smi --query-gpu=memory.used,utilization.gpu` returns N/A, so we parse
+// `nvidia-smi -q -x` (XML), which does report per-MIG framebuffer memory.
+//
+// NVIDIA does not expose per-MIG *utilization* (gpu/memory/encoder/...) through
+// NVML or nvidia-smi — only DCGM/GPM does — so GPUUtil is reported as 0 here.
+// Memory usage is accurate; restoring real MIG utilization would require sourcing
+// it from DCGM (tracked separately).
+func (s *MetricsCollector) GetNVIDIAMIGGPUMetrics(ctx context.Context) ([]schemas.GPUMetrics, error) {
+	cmd := exec.CommandContext(ctx, "nvidia-smi", "-q", "-x")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		return []schemas.GPUMetrics{}, fmt.Errorf("failed to execute nvidia-smi -q -x: %w", err)
+	}
+	return parseNvidiaMIGMemoryMetrics(out.Bytes())
+}
+
+// nvidiaSMILog mirrors the subset of `nvidia-smi -q -x` output we need.
+type nvidiaSMILog struct {
+	XMLName xml.Name       `xml:"nvidia_smi_log"`
+	GPUs    []nvidiaXMLGPU `xml:"gpu"`
+}
+
+type nvidiaXMLGPU struct {
+	MIGDevices []nvidiaXMLMIGDevice `xml:"mig_devices>mig_device"`
+}
+
+type nvidiaXMLMIGDevice struct {
+	FBMemoryUsage nvidiaXMLMemory `xml:"fb_memory_usage"`
+}
+
+type nvidiaXMLMemory struct {
+	Used string `xml:"used"` // e.g. "1234 MiB", or "N/A" if unavailable
+}
+
+// parseNvidiaMIGMemoryMetrics extracts per-MIG-instance memory usage from
+// `nvidia-smi -q -x` output, emitting one GPUMetrics entry per MIG device in
+// discovery order. Utilization is unavailable under MIG and reported as 0.
+func parseNvidiaMIGMemoryMetrics(data []byte) ([]schemas.GPUMetrics, error) {
+	var smiLog nvidiaSMILog
+	if err := xml.Unmarshal(data, &smiLog); err != nil {
+		return []schemas.GPUMetrics{}, fmt.Errorf("failed to parse nvidia-smi xml: %w", err)
+	}
+	metrics := []schemas.GPUMetrics{}
+	for _, g := range smiLog.GPUs {
+		for _, mig := range g.MIGDevices {
+			// "N/A" or unparseable memory is treated as 0 used rather than failing
+			// the whole batch.
+			usedMiB, _ := parseMiBValue(mig.FBMemoryUsage.Used)
+			metrics = append(metrics, schemas.GPUMetrics{
+				GPUMemoryUsage: usedMiB * 1024 * 1024,
+				GPUUtil:        0, // per-MIG utilization not exposed by nvidia-smi
+			})
+		}
+	}
+	return metrics, nil
+}
+
+// parseMiBValue parses nvidia-smi memory values like "1234 MiB" into a MiB count.
+// Returns (0, false) for "N/A" or any unparseable value.
+func parseMiBValue(s string) (uint64, bool) {
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, "MiB")
+	s = strings.TrimSpace(s)
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }
 
 func (s *MetricsCollector) GetAMDGPUMetrics(ctx context.Context) ([]schemas.GPUMetrics, error) {
