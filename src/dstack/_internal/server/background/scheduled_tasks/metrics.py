@@ -207,7 +207,7 @@ def _parse_dcgm_mig_metrics(dcgm_text: str) -> List[_MIGPoint]:
         if match is None:
             continue
         name = match.group("name")
-        if name not in ("DCGM_FI_DEV_FB_USED", "DCGM_FI_PROF_GR_ENGINE_ACTIVE"):
+        if name not in ("DCGM_FI_DEV_FB_USED", "DCGM_FI_PROF_SM_ACTIVE"):
             continue
         labels = dict(_DCGM_LABEL_RE.findall(match.group("labels")))
         gi_raw = labels.get("GPU_I_ID")
@@ -222,7 +222,11 @@ def _parse_dcgm_mig_metrics(dcgm_text: str) -> List[_MIGPoint]:
         entry = by_instance.setdefault(key, {})
         if name == "DCGM_FI_DEV_FB_USED":
             entry["memory_usage_bytes"] = int(value) * 1024 * 1024  # MiB -> bytes
-        else:  # DCGM_FI_PROF_GR_ENGINE_ACTIVE, a 0..1 ratio
+        else:
+            # DCGM_FI_PROF_SM_ACTIVE: ratio (0..1) of cycles the slice's SMs have
+            # a warp assigned, averaged over the slice's SMs. Unlike
+            # GR_ENGINE_ACTIVE, this is normalized to the MIG instance, so a fully
+            # busy slice reads ~1.0 rather than capping at its fraction of the GPU.
             entry["util_percent"] = round(value * 100)
 
     points = []

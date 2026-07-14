@@ -98,8 +98,9 @@ class TestParseDCGMMIGMetrics:
             "# TYPE DCGM_FI_DEV_FB_USED gauge\n"
             'DCGM_FI_DEV_FB_USED{gpu="0",UUID="GPU-x",GPU_I_PROFILE="1g.24gb",GPU_I_ID="5"} 18723\n'
             'DCGM_FI_DEV_FB_USED{gpu="0",UUID="GPU-x",GPU_I_PROFILE="1g.24gb",GPU_I_ID="6"} 66\n'
-            'DCGM_FI_PROF_GR_ENGINE_ACTIVE{gpu="0",UUID="GPU-x",GPU_I_ID="5"} 0.174817\n'
-            'DCGM_FI_PROF_GR_ENGINE_ACTIVE{gpu="0",UUID="GPU-x",GPU_I_ID="6"} 0.000000\n'
+            # SM_ACTIVE is slice-normalized (a saturated slice ~1.0), unlike GR_ENGINE_ACTIVE
+            'DCGM_FI_PROF_SM_ACTIVE{gpu="0",UUID="GPU-x",GPU_I_ID="5"} 0.928386\n'
+            'DCGM_FI_PROF_SM_ACTIVE{gpu="0",UUID="GPU-x",GPU_I_ID="6"} 0.000000\n'
             # physical-GPU line without GPU_I_ID must be ignored
             'DCGM_FI_DEV_GPU_TEMP{gpu="0",UUID="GPU-x"} 66\n'
         )
@@ -107,14 +108,14 @@ class TestParseDCGMMIGMetrics:
         assert len(points) == 2
         # sorted by (gpu, GPU_I_ID): instance 5 then 6
         assert points[0].memory_usage_bytes == 18723 * 1024 * 1024
-        assert points[0].util_percent == 17  # round(0.174817 * 100)
+        assert points[0].util_percent == 93  # round(0.928386 * 100)
         assert points[1].memory_usage_bytes == 66 * 1024 * 1024
         assert points[1].util_percent == 0
 
     def test_non_mig_output_yields_empty(self):
         text = (
             'DCGM_FI_DEV_FB_USED{gpu="0",UUID="GPU-x"} 1234\n'
-            'DCGM_FI_PROF_GR_ENGINE_ACTIVE{gpu="0",UUID="GPU-x"} 0.5\n'
+            'DCGM_FI_PROF_SM_ACTIVE{gpu="0",UUID="GPU-x"} 0.5\n'
         )
         assert _parse_dcgm_mig_metrics(text) == []
 
