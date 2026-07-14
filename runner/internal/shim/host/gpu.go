@@ -27,7 +27,7 @@ type GpuInfo struct {
 	Vendor gpu.GpuVendor
 	Name   string
 	Vram   int // MiB
-	// NVIDIA: uuid field from nvidia-smi, "globally unique immutable alphanumeric identifier of the GPU",
+	// NVIDIA: device UUID reported by NVML, "globally unique immutable alphanumeric identifier of the GPU",
 	// in the form of `GPU-2b79666e-d81f-f3f8-fd47-9903f118c3f5`
 	// AMD: empty string (AMD devices have IDs in `amd-smi list`, but we don't need them)
 	// Intel: empty string (Gaudi devices have IDs called `uuid`, e.g., `01P0-HL2080A0-15-TNPS14-20-07-07`,
@@ -57,56 +57,6 @@ func GetGpuInfo(ctx context.Context) []GpuInfo {
 		return []GpuInfo{}
 	}
 	return []GpuInfo{}
-}
-
-func getNvidiaGpuInfo(ctx context.Context) []GpuInfo {
-	gpus := []GpuInfo{}
-
-	cmd := execute.ExecTask{
-		Command:     "nvidia-smi",
-		Args:        []string{"--query-gpu=name,memory.total,uuid", "--format=csv,noheader,nounits"},
-		StreamStdio: false,
-	}
-	res, err := cmd.Execute(ctx)
-	if err != nil {
-		log.Error(ctx, "failed to execute nvidia-smi", "err", err)
-		return gpus
-	}
-	if res.ExitCode != 0 {
-		log.Error(
-			ctx, "failed to execute nvidia-smi",
-			"exitcode", res.ExitCode, "stdout", res.Stdout, "stderr", res.Stderr,
-		)
-		return gpus
-	}
-
-	r := csv.NewReader(strings.NewReader(res.Stdout))
-	for {
-		record, err := r.Read()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			log.Error(ctx, "cannot read csv", "err", err)
-			return gpus
-		}
-		if len(record) != 3 {
-			log.Error(ctx, "3 csv fields expected", "len", len(record))
-			return gpus
-		}
-		vram, err := strconv.Atoi(strings.TrimSpace(record[1]))
-		if err != nil {
-			log.Error(ctx, "invalid VRAM value", "value", record[1])
-			vram = 0
-		}
-		gpus = append(gpus, GpuInfo{
-			Vendor: gpu.GpuVendorNvidia,
-			Name:   strings.TrimSpace(record[0]),
-			Vram:   vram,
-			ID:     strings.TrimSpace(record[2]),
-		})
-	}
-	return gpus
 }
 
 type amdGpu struct {
