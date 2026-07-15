@@ -45,3 +45,29 @@ func TestGetAMDGPUMetrics_ErrorGPUUtilNA(t *testing.T) {
 	assert.ErrorContains(t, err, "GPU utilization is N/A")
 	assert.Nil(t, metrics)
 }
+
+func TestParseNVIDIASMILikeMetrics_OK(t *testing.T) {
+	metrics, err := parseNVIDIASMILikeMetrics("1024, 50\n2048, 75\n")
+	assert.NoError(t, err)
+	assert.Equal(t, []schemas.GPUMetrics{
+		{GPUMemoryUsage: 1024 * 1024 * 1024, GPUUtil: 50},
+		{GPUMemoryUsage: 2048 * 1024 * 1024, GPUUtil: 75},
+	}, metrics)
+}
+
+func TestParseNVIDIASMILikeMetrics_MIGRowKeepsPositionWithZeroPlaceholder(t *testing.T) {
+	// A MIG instance reports "[Not Supported]" for both fields; the row must
+	// still be counted, with zero placeholders, so a mixed MIG+physical
+	// container's GPU list stays positionally aligned with the container's
+	// assigned device order. The real MIG values are filled in server-side
+	// from DCGM.
+	metrics, err := parseNVIDIASMILikeMetrics(
+		"1024, 50\n[Not Supported], [Not Supported]\n2048, 75\n",
+	)
+	assert.NoError(t, err)
+	assert.Equal(t, []schemas.GPUMetrics{
+		{GPUMemoryUsage: 1024 * 1024 * 1024, GPUUtil: 50},
+		{GPUMemoryUsage: 0, GPUUtil: 0},
+		{GPUMemoryUsage: 2048 * 1024 * 1024, GPUUtil: 75},
+	}, metrics)
+}

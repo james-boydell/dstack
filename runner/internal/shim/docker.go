@@ -360,8 +360,30 @@ func (d *DockerRunner) TaskInfo(taskID string) TaskInfo {
 		ContainerName:      task.containerName,
 		ContainerID:        task.containerID,
 		GpuIDs:             task.gpuIDs,
+		MigLabels:          d.taskMigLabels(task.gpuIDs),
 		ImagePullProgress:  task.pullTracker.Progress(),
 	}
+}
+
+// taskMigLabels returns the subset of d.migDCGMLabels relevant to the given
+// task's assigned GPU IDs, so TaskInfo can tell the server which of this
+// task's GPUs are MIG instances and how to find their DCGM metrics lines.
+// Returns nil (not an empty map) when the task has no MIG GPUs, matching the
+// zero-value JSON omission behavior expected by older/simpler clients.
+func (d *DockerRunner) taskMigLabels(gpuIDs []string) map[string][]string {
+	if len(d.migDCGMLabels) == 0 {
+		return nil
+	}
+	var labels map[string][]string
+	for _, id := range gpuIDs {
+		if l, ok := d.migDCGMLabels[id]; ok {
+			if labels == nil {
+				labels = map[string][]string{}
+			}
+			labels[id] = l
+		}
+	}
+	return labels
 }
 
 // TaskDCGMMatchers returns the dcgm-exporter label matchers for the GPUs

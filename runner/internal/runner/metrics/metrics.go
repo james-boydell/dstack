@@ -257,13 +257,21 @@ func parseNVIDIASMILikeMetrics(output string) ([]schemas.GPUMetrics, error) {
 		if len(parts) != 2 {
 			continue
 		}
+		// Under MIG, nvidia-smi cannot report memory/utilization for a MIG
+		// instance and returns a placeholder like "[Not Supported]" or
+		// "[Insufficient Permissions]" instead of a number. Treat those fields
+		// as zero rather than aborting the row: failing the whole row would
+		// silently drop this GPU (and every GPU after it, since we'd return
+		// early) from the result, breaking the server's assumption that this
+		// list is positionally aligned with the container's assigned GPU IDs.
+		// The real MIG values are filled in server-side from DCGM instead.
 		memUsed, err := strconv.ParseUint(strings.TrimSpace(parts[0]), 10, 64)
 		if err != nil {
-			return metrics, fmt.Errorf("failed to parse memory used: %w", err)
+			memUsed = 0
 		}
 		utilization, err := strconv.ParseUint(strings.TrimSpace(strings.TrimSuffix(parts[1], "%")), 10, 64)
 		if err != nil {
-			return metrics, fmt.Errorf("failed to parse accelerator utilization: %w", err)
+			utilization = 0
 		}
 		metrics = append(metrics, schemas.GPUMetrics{
 			GPUMemoryUsage: memUsed * 1024 * 1024, // Convert MiB to bytes

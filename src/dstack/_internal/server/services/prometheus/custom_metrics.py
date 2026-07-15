@@ -219,15 +219,15 @@ _INSTANCE_DURATION = "dstack_instance_duration_seconds_total"
 _INSTANCE_PRICE = "dstack_instance_price_dollars_per_hour"
 _INSTANCE_GPU_COUNT = "dstack_instance_gpu_count"
 _RUN_COUNT_TOTAL = "dstack_run_count_total"
-_RUN_COUNT_PENDING = "dstack_run_count_pending_total"
-_RUN_COUNT_SUBMITTED = "dstack_run_count_submitted_total"
-_RUN_COUNT_PROVISIONING = "dstack_run_count_provisioning_total"
-_RUN_COUNT_RUNNING = "dstack_run_count_running_total"
-_RUN_COUNT_TERMINATING = "dstack_run_count_terminating_total"
+_RUN_COUNT_PENDING = "dstack_run_count_pending"
+_RUN_COUNT_SUBMITTED = "dstack_run_count_submitted"
+_RUN_COUNT_PROVISIONING = "dstack_run_count_provisioning"
+_RUN_COUNT_RUNNING = "dstack_run_count_running"
+_RUN_COUNT_TERMINATING = "dstack_run_count_terminating"
 _RUN_COUNT_TERMINATED = "dstack_run_count_terminated_total"
 _RUN_COUNT_FAILED = "dstack_run_count_failed_total"
 _RUN_COUNT_DONE = "dstack_run_count_done_total"
-_RUN_COUNT_ACTIVE = "dstack_run_count_active_total"
+_RUN_COUNT_ACTIVE = "dstack_run_count_active"
 _JOB_DURATION = "dstack_job_duration_seconds_total"
 _JOB_PRICE = "dstack_job_price_dollars_per_hour"
 _JOB_GPU_COUNT = "dstack_job_gpu_count"
@@ -280,8 +280,8 @@ class _InstanceMetrics(_Metrics):
 class _RunMetrics(_Metrics):
     metrics = [
         (_RUN_COUNT_TOTAL, _COUNTER, "Total runs count"),
-        (_RUN_COUNT_PENDING, _GAUGE, "Runs in pending state"),
-        (_RUN_COUNT_SUBMITTED, _GAUGE, "Runs in sumbitted state"),
+        (_RUN_COUNT_PENDING, _GAUGE, "Runs in the pending state"),
+        (_RUN_COUNT_SUBMITTED, _GAUGE, "Runs in the submitted state"),
         (_RUN_COUNT_PROVISIONING, _GAUGE, "Runs in the provisioning state"),
         (_RUN_COUNT_RUNNING, _GAUGE, "Runs in the running state"),
         (_RUN_COUNT_TERMINATING, _GAUGE, "Runs in the terminating state"),

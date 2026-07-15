@@ -143,7 +143,7 @@ async def _collect_job_metrics(job_model: JobModel) -> Optional[JobMetricsPoint]
         logger.warning("Failed to connect to job %s to collect metrics", job_model.job_name)
         return None
 
-    metrics, dcgm_text = res
+    metrics, dcgm_text, task_gpu_info = res
     if metrics is None:
         logger.debug(
             (
@@ -158,14 +158,38 @@ async def _collect_job_metrics(job_model: JobModel) -> Optional[JobMetricsPoint]
     gpus_memory_usage_bytes = [g.gpu_memory_usage_bytes for g in metrics.gpus]
     gpus_util_percent = [g.gpu_util_percent for g in metrics.gpus]
 
-    # Under MIG, the runner's nvidia-smi cannot report per-instance GPU utilization
-    # (it's only available via DCGM/GPM). When the shim provides per-MIG DCGM
-    # metrics, use them for both memory and utilization so the two stay aligned
-    # per instance (the DCGM output is labeled by GPU_I_ID, not by list position).
-    mig_points = _parse_dcgm_mig_metrics(dcgm_text) if dcgm_text else []
-    if mig_points:
-        gpus_memory_usage_bytes = [p.memory_usage_bytes for p in mig_points]
-        gpus_util_percent = [p.util_percent for p in mig_points]
+    # Under MIG, the runner's nvidia-smi cannot report per-instance GPU
+    # utilization (it's only available via DCGM/GPM). When the shim tells us
+    # which of the job's GPU IDs are MIG instances (task_gpu_info.mig_labels)
+    # and DCGM output is available, override only those specific positions --
+    # a job's physical GPUs keep the runner-reported values untouched. A job
+    # can have both a MIG slice and a physical GPU assigned at once, so we must
+    # not assume "any MIG data present" means "every GPU in this job is MIG."
+    #
+    # This only applies when the runner's GPU list lines up 1:1 with the
+    # shim's gpus_ids (both are built from the same container device order);
+    # if the lengths disagree -- e.g. a partial/older runner response -- we
+    # leave the runner-reported values as-is rather than risk misattributing
+    # metrics to the wrong GPU.
+    if dcgm_text and task_gpu_info and task_gpu_info.mig_labels:
+        gpu_ids = task_gpu_info.gpu_ids
+        if len(gpu_ids) == len(metrics.gpus):
+            for i, gpu_id in enumerate(gpu_ids):
+                label_substrings = task_gpu_info.mig_labels.get(gpu_id)
+                if label_substrings is None:
+                    continue  # physical GPU (or unknown) -- keep the runner value
+                point = _match_dcgm_line(dcgm_text, label_substrings)
+                if point is not None:
+                    gpus_memory_usage_bytes[i] = point.memory_usage_bytes
+                    gpus_util_percent[i] = point.util_percent
+        else:
+            logger.warning(
+                "Job %s: GPU count mismatch between runner (%d) and shim (%d);"
+                " skipping MIG metric override",
+                job_model.job_name,
+                len(metrics.gpus),
+                len(gpu_ids),
+            )
 
     return JobMetricsPoint(
         job_id=job_model.id,
@@ -183,25 +207,33 @@ class _MIGPoint(NamedTuple):
     util_percent: int
 
 
+class _TaskGpuInfo(NamedTuple):
+    gpu_ids: List[str]
+    mig_labels: dict[str, List[str]]
+
+
 # Matches a DCGM exporter sample line: NAME{label="v",...} <number>
 _DCGM_LINE_RE = re.compile(r"^(?P<name>DCGM_FI_\w+)\{(?P<labels>[^}]*)\}\s+(?P<value>[-\d.eE+]+)")
-_DCGM_LABEL_RE = re.compile(r'(\w+)="([^"]*)"')
 
 
-def _parse_dcgm_mig_metrics(dcgm_text: str) -> List[_MIGPoint]:
+def _match_dcgm_line(dcgm_text: str, label_substrings: List[str]) -> Optional[_MIGPoint]:
     """
-    Parse per-MIG-instance memory and utilization from the shim's filtered
-    dcgm-exporter output.
+    Extract memory/utilization for a single GPU/MIG instance identified by its
+    dcgm-exporter label substrings, as reported by the shim's
+    TaskInfoResponse.mig_labels (e.g. ``['gpu="0"', 'GPU_I_ID="5"']``).
 
-    Only MIG instances (lines carrying a ``GPU_I_ID`` label) are considered;
-    physical-GPU lines are ignored, so non-MIG jobs yield an empty list and fall
-    back to the runner's metrics. Instances are returned sorted by
-    ``(gpu, GPU_I_ID)`` for a stable per-instance order.
+    Mirrors the AND-matcher semantics of the shim's
+    dcgm.FilterMetrics/lineMatchesAny: a line matches only if every substring
+    in `label_substrings` is present in it, so this only needs to check
+    substring membership, not parse individual labels out.
     """
-    by_instance: dict[tuple[int, int], dict] = {}
+    memory_usage_bytes: Optional[int] = None
+    util_percent: Optional[int] = None
     for raw_line in dcgm_text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
+            continue
+        if not all(sub in line for sub in label_substrings):
             continue
         match = _DCGM_LINE_RE.match(line)
         if match is None:
@@ -209,54 +241,47 @@ def _parse_dcgm_mig_metrics(dcgm_text: str) -> List[_MIGPoint]:
         name = match.group("name")
         if name not in ("DCGM_FI_DEV_FB_USED", "DCGM_FI_PROF_SM_ACTIVE"):
             continue
-        labels = dict(_DCGM_LABEL_RE.findall(match.group("labels")))
-        gi_raw = labels.get("GPU_I_ID")
-        if not gi_raw:
-            # Not a MIG instance (physical GPU line) — ignore.
-            continue
         try:
-            key = (int(labels.get("gpu", "0")), int(gi_raw))
             value = float(match.group("value"))
         except ValueError:
             continue
-        entry = by_instance.setdefault(key, {})
         if name == "DCGM_FI_DEV_FB_USED":
-            entry["memory_usage_bytes"] = int(value) * 1024 * 1024  # MiB -> bytes
+            memory_usage_bytes = int(value) * 1024 * 1024  # MiB -> bytes
         else:
             # DCGM_FI_PROF_SM_ACTIVE: ratio (0..1) of cycles the slice's SMs have
             # a warp assigned, averaged over the slice's SMs. Unlike
             # GR_ENGINE_ACTIVE, this is normalized to the MIG instance, so a fully
             # busy slice reads ~1.0 rather than capping at its fraction of the GPU.
-            entry["util_percent"] = round(value * 100)
-
-    points = []
-    for key in sorted(by_instance):
-        entry = by_instance[key]
-        points.append(
-            _MIGPoint(
-                memory_usage_bytes=entry.get("memory_usage_bytes", 0),
-                util_percent=entry.get("util_percent", 0),
-            )
-        )
-    return points
+            util_percent = round(value * 100)
+    if memory_usage_bytes is None and util_percent is None:
+        return None
+    return _MIGPoint(memory_usage_bytes=memory_usage_bytes or 0, util_percent=util_percent or 0)
 
 
 @runner_ssh_tunnel
 def _pull_runner_metrics(
     addresses: Mapping[int, client.LocalAddress],
     task_id: uuid.UUID,
-) -> tuple[Optional[MetricsResponse], Optional[str]]:
+) -> tuple[Optional[MetricsResponse], Optional[str], Optional[_TaskGpuInfo]]:
     runner_client = client.RunnerClient.from_address(addresses[DSTACK_RUNNER_HTTP_PORT])
     metrics = runner_client.get_metrics()
     # On VM-based backends the shim port is also forwarded; fetch per-task DCGM
     # metrics so MIG utilization (unavailable via the runner) can be filled in.
     # Container-based backends have no shim, so the port is absent and we skip it.
     dcgm_text: Optional[str] = None
+    task_gpu_info: Optional[_TaskGpuInfo] = None
     shim_address = addresses.get(DSTACK_SHIM_HTTP_PORT)
     if shim_address is not None:
+        shim_client = client.ShimClient.from_address(shim_address)
         try:
-            shim_client = client.ShimClient.from_address(shim_address)
             dcgm_text = shim_client.get_task_metrics(task_id)
         except Exception:
             logger.debug("Failed to fetch DCGM metrics for task %s", task_id, exc_info=True)
-    return metrics, dcgm_text
+        try:
+            task_info = shim_client.get_task(task_id)
+            task_gpu_info = _TaskGpuInfo(
+                gpu_ids=task_info.gpus_ids, mig_labels=task_info.mig_labels
+            )
+        except Exception:
+            logger.debug("Failed to fetch task GPU info for task %s", task_id, exc_info=True)
+    return metrics, dcgm_text, task_gpu_info

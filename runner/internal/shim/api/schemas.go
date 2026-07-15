@@ -36,6 +36,12 @@ type TaskInfoResponse struct {
 	ContainerName string   `json:"container_name"`
 	ContainerID   string   `json:"container_id"`
 	GpuIDs        []string `json:"gpus_ids"`
+	// MigLabels maps each MIG GPU ID in GpuIDs to the dcgm-exporter label
+	// substrings that identify its metrics lines (physical GPU index +
+	// GPU instance ID). Lets the server correlate DCGM output with the
+	// correct position in a job's GPU list when it mixes MIG and physical
+	// GPUs. Absent (nil) for non-MIG entries and on hosts without MIG.
+	MigLabels map[string][]string `json:"mig_labels"`
 }
 
 type TaskSubmitRequest = shim.TaskConfig

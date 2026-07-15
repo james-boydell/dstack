@@ -272,6 +272,31 @@ class TestGetPrometheusMetrics:
             dstack_run_count_total{{dstack_project_name="project-1",dstack_user_name="test-user"}} 4.0
             dstack_run_count_total{{dstack_project_name="project-2",dstack_user_name="other-user"}} 2.0
             dstack_run_count_total{{dstack_project_name="project-2",dstack_user_name="test-user"}} 1.0
+            # HELP dstack_run_count_pending Runs in the pending state
+            # TYPE dstack_run_count_pending gauge
+            dstack_run_count_pending{{dstack_project_name="project-1",dstack_user_name="test-user"}} 0.0
+            dstack_run_count_pending{{dstack_project_name="project-2",dstack_user_name="other-user"}} 0.0
+            dstack_run_count_pending{{dstack_project_name="project-2",dstack_user_name="test-user"}} 0.0
+            # HELP dstack_run_count_submitted Runs in the submitted state
+            # TYPE dstack_run_count_submitted gauge
+            dstack_run_count_submitted{{dstack_project_name="project-1",dstack_user_name="test-user"}} 3.0
+            dstack_run_count_submitted{{dstack_project_name="project-2",dstack_user_name="other-user"}} 0.0
+            dstack_run_count_submitted{{dstack_project_name="project-2",dstack_user_name="test-user"}} 1.0
+            # HELP dstack_run_count_provisioning Runs in the provisioning state
+            # TYPE dstack_run_count_provisioning gauge
+            dstack_run_count_provisioning{{dstack_project_name="project-1",dstack_user_name="test-user"}} 0.0
+            dstack_run_count_provisioning{{dstack_project_name="project-2",dstack_user_name="other-user"}} 0.0
+            dstack_run_count_provisioning{{dstack_project_name="project-2",dstack_user_name="test-user"}} 0.0
+            # HELP dstack_run_count_running Runs in the running state
+            # TYPE dstack_run_count_running gauge
+            dstack_run_count_running{{dstack_project_name="project-1",dstack_user_name="test-user"}} 0.0
+            dstack_run_count_running{{dstack_project_name="project-2",dstack_user_name="other-user"}} 0.0
+            dstack_run_count_running{{dstack_project_name="project-2",dstack_user_name="test-user"}} 0.0
+            # HELP dstack_run_count_terminating Runs in the terminating state
+            # TYPE dstack_run_count_terminating gauge
+            dstack_run_count_terminating{{dstack_project_name="project-1",dstack_user_name="test-user"}} 0.0
+            dstack_run_count_terminating{{dstack_project_name="project-2",dstack_user_name="other-user"}} 0.0
+            dstack_run_count_terminating{{dstack_project_name="project-2",dstack_user_name="test-user"}} 0.0
             # HELP dstack_run_count_terminated_total Terminated runs count
             # TYPE dstack_run_count_terminated_total counter
             dstack_run_count_terminated_total{{dstack_project_name="project-1",dstack_user_name="test-user"}} 0.0
@@ -287,6 +312,11 @@ class TestGetPrometheusMetrics:
             dstack_run_count_done_total{{dstack_project_name="project-1",dstack_user_name="test-user"}} 1.0
             dstack_run_count_done_total{{dstack_project_name="project-2",dstack_user_name="other-user"}} 0.0
             dstack_run_count_done_total{{dstack_project_name="project-2",dstack_user_name="test-user"}} 0.0
+            # HELP dstack_run_count_active Total number of active runs
+            # TYPE dstack_run_count_active gauge
+            dstack_run_count_active{{dstack_project_name="project-1",dstack_user_name="test-user"}} 3.0
+            dstack_run_count_active{{dstack_project_name="project-2",dstack_user_name="other-user"}} 0.0
+            dstack_run_count_active{{dstack_project_name="project-2",dstack_user_name="test-user"}} 1.0
             # HELP dstack_job_duration_seconds_total Total seconds the job is running
             # TYPE dstack_job_duration_seconds_total counter
             dstack_job_duration_seconds_total{{dstack_project_name="project-1",dstack_user_name="test-user",dstack_run_name="run-1",dstack_run_id="{job_1_1.run_id}",dstack_job_name="run-1-0-0",dstack_job_id="{job_1_1.id}",dstack_job_num="0",dstack_replica_num="0",dstack_run_type="dev-environment",dstack_backend="aws",dstack_gpu="V4"}} 120.0

@@ -225,6 +225,18 @@ class TaskInfoResponse(CoreModel):
     It can be removed after a few releases.
     """
     image_pull_progress: Optional[ImagePullProgress] = None
+    gpus_ids: list[str] = []
+    """GPU/MIG device IDs (e.g. "GPU-<uuid>" or "MIG-<uuid>") assigned to the
+    task, in the order passed to the container. Empty for old shim versions
+    that don't report it.
+    """
+    mig_labels: dict[str, list[str]] = {}
+    """For each MIG device ID in `gpus_ids`, the dcgm-exporter label substrings
+    (physical GPU index + GPU instance ID) that identify its metrics lines in
+    the DCGM exporter output. Used to correlate per-MIG utilization/memory
+    with the correct position in a job's GPU list when it mixes MIG and
+    physical GPUs. Empty for old shim versions or non-MIG hosts.
+    """
 
 
 class TaskSubmitRequest(CoreModel):

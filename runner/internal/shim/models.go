@@ -128,4 +128,5 @@ type TaskInfo struct {
 	ContainerName      string
 	ContainerID        string
 	GpuIDs             []string
+	MigLabels          map[string][]string
 }
